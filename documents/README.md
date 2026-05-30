@@ -16,14 +16,20 @@ material lives here.
 
 ## Engineering references
 
+* [engineering/schema.md](engineering/schema.md) — the `hostbootstrap.dhall`
+  project-config schema, its three execution models, and how illegal states
+  are rejected.
 * [engineering/base_image.md](engineering/base_image.md) — the four
   `basecontainer-<flavor>-<arch>` tags and what they contain.
 * [engineering/build_release.md](engineering/build_release.md) — base-image
   build, publish, and `--build-base` semantics.
 * [engineering/prerequisites.md](engineering/prerequisites.md) — substrate
   prereqs absorbed by `hostbootstrap doctor`.
-* [engineering/harbor.md](engineering/harbor.md) — arch-explicit Harbor push
-  with no orphans.
+* [engineering/testing.md](engineering/testing.md) — the layered test suite, the
+  `test-all` entrypoint, and how to run it.
+* [engineering/harbor.md](engineering/harbor.md) — downstream guidance for a
+  project pushing its own arch-explicit image (hostbootstrap does not push
+  project images).
 * [engineering/gitignore_guardrails.md](engineering/gitignore_guardrails.md) —
   what must stay out of version control.
 

@@ -12,12 +12,12 @@ import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
 
-class SubstrateName(str, Enum):
+class SubstrateName(StrEnum):
     APPLE_SILICON = "apple-silicon"
     LINUX_CPU = "linux-cpu"
     LINUX_GPU = "linux-gpu"

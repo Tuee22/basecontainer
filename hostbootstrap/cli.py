@@ -2,7 +2,9 @@
 
 The single entrypoint installed on every downstream host (via
 ``pip install git+…``). Commands implement §6 of the plan: doctor, build,
-push, cluster up/down/delete, run, base build/push.
+cluster up/down/delete, run, base build/push. Each substrate's execution model
+(``container`` / ``host-binary`` / ``host-daemon``) is declared in the project's
+``hostbootstrap.dhall`` and dispatched here.
 """
 
 from __future__ import annotations
@@ -15,13 +17,14 @@ from typing import Final
 
 import click
 
-from . import base_image, docker_ops, harbor, prereqs, process, spec, substrate
+from . import base_image, docker_ops, prereqs, process, spec, substrate, units
 from .base_image import Flavor
-from .models import host_binary, multi_substrate, outer_container
-from .spec import ModelName, ProjectSpec, SpecError
+from .models import container as container_model
+from .models import host_binary, host_daemon
+from .spec import ContainerModel, HostBinaryModel, ProjectSpec, SpecError
 from .substrate import Substrate, SubstrateName
 
-_DEFAULT_SPEC_PATH: Final[Path] = Path("hostbootstrap.yaml")
+_DEFAULT_SPEC_PATH: Final[Path] = Path("hostbootstrap.dhall")
 
 
 def _load_spec(spec_path: Path) -> ProjectSpec:
@@ -39,15 +42,13 @@ def _detect_substrate() -> Substrate:
 
 
 async def _build(project_spec: ProjectSpec, sub: Substrate, project_root: Path) -> None:
-    substrate_spec = project_spec.substrate_for(sub)
-    if substrate_spec.model is ModelName.OUTER_CONTAINER:
-        await outer_container.build(project_spec, sub, project_root=project_root)
-    elif substrate_spec.model is ModelName.HOST_BINARY:
-        await host_binary.build(project_spec, sub, project_root=project_root)
-    elif substrate_spec.model is ModelName.MULTI_SUBSTRATE:
-        await multi_substrate.build(project_spec, sub, project_root=project_root)
+    model = project_spec.model_for(sub)
+    if isinstance(model, ContainerModel):
+        await container_model.build(project_spec, model, sub, project_root=project_root)
+    elif isinstance(model, HostBinaryModel):
+        await host_binary.build(project_spec, model, sub, project_root=project_root)
     else:
-        raise click.ClickException(f"unknown model: {substrate_spec.model}")
+        await host_daemon.build(project_spec, model, sub, project_root=project_root)
 
 
 async def _run(
@@ -56,41 +57,85 @@ async def _run(
     project_root: Path,
     command: Sequence[str],
 ) -> process.CommandResult:
-    substrate_spec = project_spec.substrate_for(sub)
-    if substrate_spec.model is ModelName.OUTER_CONTAINER:
-        return await outer_container.run_one_shot(
-            project_spec, sub, command, project_root=project_root
+    model = project_spec.model_for(sub)
+    if isinstance(model, ContainerModel):
+        return await container_model.run_one_shot(
+            project_spec, model, sub, command, project_root=project_root
         )
-    if substrate_spec.model is ModelName.HOST_BINARY:
+    if isinstance(model, HostBinaryModel):
         return await host_binary.run_one_shot(
-            project_spec, sub, command, project_root=project_root
+            project_spec, model, sub, command, project_root=project_root
         )
-    if substrate_spec.model is ModelName.MULTI_SUBSTRATE:
-        return await multi_substrate.run_one_shot(
-            project_spec, sub, command, project_root=project_root
-        )
-    raise click.ClickException(f"unknown model: {substrate_spec.model}")
+    return await host_daemon.run_one_shot(
+        project_spec, model, sub, command, project_root=project_root
+    )
+
+
+async def _cluster_up(project_spec: ProjectSpec, sub: Substrate, project_root: Path) -> None:
+    model = project_spec.model_for(sub)
+    if isinstance(model, ContainerModel):
+        if model.service:
+            await container_model.start_service(project_spec, model, sub, project_root=project_root)
+            click.echo(f"started service container {project_spec.project!r} (unless-stopped).")
+        else:
+            await container_model.build(project_spec, model, sub, project_root=project_root)
+            click.echo("built project image; invoke one-shot work with `hostbootstrap run …`.")
+    elif isinstance(model, HostBinaryModel):
+        await host_binary.build(project_spec, model, sub, project_root=project_root)
+        cmd = host_binary.resolve_command(model.handoff.up, project_root)
+        await process.run_checked(list(cmd), cwd=project_root)
+    else:
+        await host_daemon.build(project_spec, model, sub, project_root=project_root)
+        cmd = host_daemon.daemon_command(model, project_root=project_root)
+        unit_path = await units.ensure(project_spec.project, cmd, project_root)
+        click.echo(f"ensured host-daemon unit {unit_path}.")
+
+
+async def _cluster_down(project_spec: ProjectSpec, sub: Substrate, project_root: Path) -> None:
+    model = project_spec.model_for(sub)
+    if isinstance(model, ContainerModel):
+        await container_model.stop_service(project_spec)
+    elif isinstance(model, HostBinaryModel):
+        cmd = host_binary.resolve_command(model.handoff.down, project_root)
+        await process.run_checked(list(cmd), cwd=project_root)
+    else:
+        await units.remove(project_spec.project)
+
+
+async def _cluster_delete(project_spec: ProjectSpec, sub: Substrate, project_root: Path) -> None:
+    model = project_spec.model_for(sub)
+    if isinstance(model, ContainerModel):
+        await container_model.stop_service(project_spec)
+    elif isinstance(model, HostBinaryModel):
+        raw = model.handoff.delete if model.handoff.delete is not None else model.handoff.down
+        cmd = host_binary.resolve_command(raw, project_root)
+        await process.run_checked(list(cmd), cwd=project_root)
+    else:
+        await units.remove(project_spec.project)
 
 
 # ---------------------------------------------------------------------------
 # Click app
 # ---------------------------------------------------------------------------
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(package_name="hostbootstrap")
-def main() -> None:
-    """Host-installed CLI for the basecontainer base images."""
-
-
-@main.command()
-@click.option(
+_SPEC_OPTION = click.option(
     "--spec",
     "spec_path",
     type=click.Path(path_type=Path),
     default=_DEFAULT_SPEC_PATH,
     show_default=True,
-    help="Path to the project's hostbootstrap.yaml",
+    help="Path to the project's hostbootstrap.dhall",
 )
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.version_option(package_name="hostbootstrap")
+def main() -> None:
+    """Host-installed CLI for the hostbootstrap base images."""
+
+
+@main.command()
+@_SPEC_OPTION
 def doctor(spec_path: Path) -> None:
     """Detect substrate; validate + idempotently install host prerequisites."""
     project_spec = _load_spec(spec_path)
@@ -108,13 +153,7 @@ def doctor(spec_path: Path) -> None:
 
 
 @main.command()
-@click.option(
-    "--spec",
-    "spec_path",
-    type=click.Path(path_type=Path),
-    default=_DEFAULT_SPEC_PATH,
-    show_default=True,
-)
+@_SPEC_OPTION
 def build(spec_path: Path) -> None:
     """Idempotently build the project artifact for the current substrate."""
     project_spec = _load_spec(spec_path)
@@ -123,101 +162,48 @@ def build(spec_path: Path) -> None:
     asyncio.run(_build(project_spec, sub, project_root))
 
 
-@main.command()
-@click.option(
-    "--spec",
-    "spec_path",
-    type=click.Path(path_type=Path),
-    default=_DEFAULT_SPEC_PATH,
-    show_default=True,
-)
-def push(spec_path: Path) -> None:
-    """Idempotently push the arch-explicit custom image to Harbor."""
-    project_spec = _load_spec(spec_path)
-    sub = _detect_substrate()
-    image_tag = f"{project_spec.project}:{sub.name.value}-{sub.arch}"
-    target = harbor.HarborTarget(
-        repo=project_spec.container.harbor.repo,
-        tag=f"{project_spec.project}-{sub.name.value}-{sub.arch}",
-    )
-    harbor.push_sync(image_tag, target)
-
-
 @main.group()
 def cluster() -> None:
     """Cluster lifecycle: up, down, delete."""
 
 
 @cluster.command("up")
-@click.option(
-    "--spec",
-    "spec_path",
-    type=click.Path(path_type=Path),
-    default=_DEFAULT_SPEC_PATH,
-    show_default=True,
-)
+@_SPEC_OPTION
 def cluster_up(spec_path: Path) -> None:
     """Bring the whole stack to running (idempotent)."""
     project_spec = _load_spec(spec_path)
     sub = _detect_substrate()
     project_root = spec_path.resolve().parent
-    asyncio.run(_build(project_spec, sub, project_root))
-    # cluster bring-up + Harbor publish + host-daemon launchd/systemd unit are
-    # the project binary's responsibility (§9.7); the CLI hands off here.
-    click.echo("cluster build complete; project binary takes over from here.")
+    asyncio.run(_cluster_up(project_spec, sub, project_root))
 
 
 @cluster.command("down")
-@click.option(
-    "--spec",
-    "spec_path",
-    type=click.Path(path_type=Path),
-    default=_DEFAULT_SPEC_PATH,
-    show_default=True,
-)
+@_SPEC_OPTION
 def cluster_down(spec_path: Path) -> None:
     """Tear the cluster down; never deletes host .data."""
     project_spec = _load_spec(spec_path)
     sub = _detect_substrate()
-    container_name = project_spec.project
-    asyncio.run(process.run([
-        "docker", "rm", "-f", container_name,
-    ], quiet=True))
-    _ = sub
-    click.echo("cluster down: stopped long-running containers; .data preserved.")
+    project_root = spec_path.resolve().parent
+    asyncio.run(_cluster_down(project_spec, sub, project_root))
+    click.echo("cluster down: host .data preserved.")
 
 
 @cluster.command("delete")
-@click.option(
-    "--spec",
-    "spec_path",
-    type=click.Path(path_type=Path),
-    default=_DEFAULT_SPEC_PATH,
-    show_default=True,
-)
+@_SPEC_OPTION
 def cluster_delete(spec_path: Path) -> None:
     """Thorough teardown (cluster + derived state); still never deletes .data."""
     project_spec = _load_spec(spec_path)
     sub = _detect_substrate()
-    container_name = project_spec.project
-    asyncio.run(process.run([
-        "docker", "rm", "-f", container_name,
-    ], quiet=True))
-    _ = sub
+    project_root = spec_path.resolve().parent
+    asyncio.run(_cluster_delete(project_spec, sub, project_root))
     click.echo("cluster delete: derived state removed; host .data preserved.")
 
 
 @main.command()
-@click.option(
-    "--spec",
-    "spec_path",
-    type=click.Path(path_type=Path),
-    default=_DEFAULT_SPEC_PATH,
-    show_default=True,
-)
+@_SPEC_OPTION
 @click.argument("command", nargs=-1)
 def run(spec_path: Path, command: tuple[str, ...]) -> None:
-    """Idempotent run: trigger ``cluster up`` then dispatch ``command``."""
+    """Build if needed, then dispatch ``command`` to the binary or container."""
     project_spec = _load_spec(spec_path)
     sub = _detect_substrate()
     project_root = spec_path.resolve().parent
@@ -227,6 +213,7 @@ def run(spec_path: Path, command: tuple[str, ...]) -> None:
 # ---------------------------------------------------------------------------
 # base build / push
 # ---------------------------------------------------------------------------
+
 
 @main.group()
 def base() -> None:

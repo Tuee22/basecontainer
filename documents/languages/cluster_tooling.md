@@ -11,7 +11,7 @@ cluster + Harbor registry:
 
 | CLI | Source |
 |---|---|
-| `docker`, `docker buildx`, `docker compose` | apt (`docker.io`, `docker-buildx`, `docker-compose-v2`) |
+| `docker`, `docker compose` | apt (`docker.io`, `docker-compose-v2`) |
 | `kind` | latest GitHub release |
 | `kubectl` | `dl.k8s.io/release/stable.txt` |
 | `helm` | latest GitHub release |
@@ -26,7 +26,7 @@ passed as `--build-arg` to the Dockerfile.
 
 ## Loopback NodePorts
 
-Multi-substrate projects' in-cluster services (e.g. MinIO, Pulsar) are
-reachable from the Apple-silicon host-native binary **only over loopback
-NodePorts (`127.0.0.0/8`)**. This is a deliberate security boundary: cluster
-services must never be reachable off-host (§9.7).
+A project's in-cluster services (e.g. MinIO, Pulsar) are reachable from a
+host-binary or host-daemon process (such as an Apple-silicon host-native
+binary) **only over loopback NodePorts (`127.0.0.0/8`)**. This is a deliberate
+security boundary: cluster services must never be reachable off-host (§9.7).

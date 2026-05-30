@@ -16,6 +16,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 
 @dataclass(frozen=True)
@@ -32,16 +33,14 @@ class CommandResult:
 
 class CommandError(RuntimeError):
     def __init__(self, result: CommandResult) -> None:
-        super().__init__(
-            f"command failed ({result.returncode}): {' '.join(result.args)}"
-        )
+        super().__init__(f"command failed ({result.returncode}): {' '.join(result.args)}")
         self.result = result
 
 
 async def _drain(
     stream: asyncio.StreamReader | None,
     sink_lines: list[str],
-    mirror,  # type: ignore[no-untyped-def]
+    mirror: TextIO,
 ) -> None:
     if stream is None:
         return

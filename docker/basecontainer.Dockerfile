@@ -40,7 +40,8 @@ ARG GHCUP_DOWNLOAD_URL
 ARG RUST_TOOLCHAIN=stable
 
 ENV DEBIAN_FRONTEND=noninteractive
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Default RUN shell only (POSIX /bin/sh): no bash, no pipes, no shell branching.
+# The one allowed exception is the documented CUDA ldconfig check at the end.
 
 RUN set -eux; \
     apt-get update; \
@@ -52,7 +53,6 @@ RUN set -eux; \
         cmake \
         curl \
         dnsutils \
-        docker-buildx \
         docker-compose-v2 \
         docker.io \
         file \
@@ -155,7 +155,7 @@ RUN set -eux; \
     tar -xJf "${tmpdir}/node.tar.xz" -C /usr/local --strip-components=1; \
     rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack; \
     printf '%s\n' \
-      '#!/usr/bin/env bash' \
+      '#!/bin/sh' \
       'exec /usr/local/bin/node /usr/local/lib/node_modules/npm/bin/npm-cli.js "$@"' \
       > /usr/local/bin/npm; \
     chmod 0755 /usr/local/bin/npm; \
@@ -206,7 +206,6 @@ RUN ghcup install ghc "${GHC_VERSION}" \
 
 RUN cabal update \
     && cabal install \
-        --jobs=1 \
         --ignore-project \
         --installdir /usr/local/bin \
         --install-method=copy \
@@ -214,17 +213,25 @@ RUN cabal update \
         fourmolu \
         hlint
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --profile minimal --default-toolchain "${RUSTUP_TOOLCHAIN}" \
-    && rustup component add --toolchain "${RUSTUP_TOOLCHAIN}" llvm-tools-preview rustfmt
+RUN set -eux; \
+    tmpdir="$(mktemp -d)"; \
+    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "${tmpdir}/rustup-init.sh"; \
+    sh "${tmpdir}/rustup-init.sh" -y --profile minimal --default-toolchain "${RUSTUP_TOOLCHAIN}"; \
+    rm -rf "${tmpdir}"; \
+    rustup component add --toolchain "${RUSTUP_TOOLCHAIN}" llvm-tools-preview rustfmt
 
 COPY support/haskell-deps/ /opt/basecontainer/haskell-deps/
 
 RUN cd /opt/basecontainer/haskell-deps \
     && cabal update \
-    && cabal build --jobs=1 all --only-dependencies \
-    && cabal build --jobs=1 all
+    && cabal build all --only-dependencies \
+    && cabal build all
 
+# The single, documented exception to the "no if/case" rule. One Dockerfile
+# serves both the `cpu` (ubuntu) and `cuda` (nvidia/cuda) base images via
+# BASE_IMAGE, so /usr/local/cuda exists only on the cuda base. This is a
+# build-time *filesystem* check — it needs no GPU, driver, or container runtime —
+# so the cuda image still builds correctly on a host with no CUDA hardware.
 RUN set -eux; \
     if [ -d /usr/local/cuda/lib64 ]; then \
       printf '/usr/local/cuda/lib64\n' > /etc/ld.so.conf.d/cuda.conf; \

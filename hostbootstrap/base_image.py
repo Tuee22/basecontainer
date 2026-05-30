@@ -15,11 +15,11 @@ Tag scheme (single-arch, no manifest lists; §4):
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 import httpx
 
@@ -27,7 +27,7 @@ from . import docker_ops
 from .substrate import Substrate, SubstrateName
 
 
-class Flavor(str, Enum):
+class Flavor(StrEnum):
     CPU = "cpu"
     CUDA = "cuda"
 
@@ -70,6 +70,7 @@ _PURESCRIPT_ASSET: Final[Mapping[str, str]] = {
 # Substrate → base tag mapping (§4)
 # ---------------------------------------------------------------------------
 
+
 def base_tag(flavor: Flavor, arch: str) -> str:
     return f"basecontainer-{flavor.value}-{arch}"
 
@@ -93,10 +94,11 @@ def substrate_to_flavor_arch(substrate: Substrate) -> tuple[Flavor, str]:
 _HTTP_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(30.0)
 
 
-def _http_get_json(url: str) -> Any:
+def _http_get_json(url: str) -> object:
     response = httpx.get(url, timeout=_HTTP_TIMEOUT, follow_redirects=True)
     response.raise_for_status()
-    return response.json()
+    payload: object = response.json()
+    return payload
 
 
 def _http_get_text(url: str) -> str:
@@ -105,29 +107,48 @@ def _http_get_text(url: str) -> str:
     return response.text
 
 
+def _as_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"expected a JSON object, got {type(value).__name__}")
+    return value
+
+
+def _as_list(value: object) -> Sequence[object]:
+    if not isinstance(value, list):
+        raise RuntimeError(f"expected a JSON array, got {type(value).__name__}")
+    return value
+
+
+def _str_field(mapping: dict[str, object], key: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str):
+        raise RuntimeError(f"expected a string at {key!r}")
+    return value
+
+
 def resolve_node_version(arch: str) -> str:
     """Latest Node release that ships a ``linux-<arch>`` tarball."""
     node_arch = _NODE_ARCH[arch]
     platform_key = f"linux-{node_arch}"
-    index = _http_get_json("https://nodejs.org/dist/index.json")
-    for entry in index:
-        files = entry.get("files") or []
-        if platform_key in files:
-            version: str = entry["version"]
-            return version
+    index = _as_list(_http_get_json("https://nodejs.org/dist/index.json"))
+    for raw in index:
+        entry = _as_dict(raw)
+        files = entry.get("files")
+        if isinstance(files, list) and platform_key in files:
+            return _str_field(entry, "version")
     raise RuntimeError(f"no node release found for {platform_key}")
 
 
+def _latest_release_tag(url: str) -> str:
+    return _str_field(_as_dict(_http_get_json(url)), "tag_name")
+
+
 def resolve_purescript_version() -> str:
-    data = _http_get_json("https://api.github.com/repos/purescript/purescript/releases/latest")
-    tag: str = data["tag_name"]
-    return tag
+    return _latest_release_tag("https://api.github.com/repos/purescript/purescript/releases/latest")
 
 
 def resolve_kind_version() -> str:
-    data = _http_get_json("https://api.github.com/repos/kubernetes-sigs/kind/releases/latest")
-    tag: str = data["tag_name"]
-    return tag
+    return _latest_release_tag("https://api.github.com/repos/kubernetes-sigs/kind/releases/latest")
 
 
 def resolve_kubectl_version() -> str:
@@ -135,26 +156,21 @@ def resolve_kubectl_version() -> str:
 
 
 def resolve_helm_version() -> str:
-    data = _http_get_json("https://api.github.com/repos/helm/helm/releases/latest")
-    tag: str = data["tag_name"]
-    return tag
+    return _latest_release_tag("https://api.github.com/repos/helm/helm/releases/latest")
 
 
 def resolve_pulumi_version() -> str:
-    data = _http_get_json("https://api.github.com/repos/pulumi/pulumi/releases/latest")
-    tag: str = data["tag_name"]
-    return tag
+    return _latest_release_tag("https://api.github.com/repos/pulumi/pulumi/releases/latest")
 
 
 def resolve_go_version() -> str:
     """Latest stable Go release version (e.g. ``1.23.4``)."""
-    data = _http_get_json("https://go.dev/dl/?mode=json")
-    for entry in data:
+    data = _as_list(_http_get_json("https://go.dev/dl/?mode=json"))
+    for raw in data:
+        entry = _as_dict(raw)
         if entry.get("stable") is True:
-            raw: str = entry["version"]
-            if raw.startswith("go"):
-                return raw[2:]
-            return raw
+            version = _str_field(entry, "version")
+            return version[2:] if version.startswith("go") else version
     raise RuntimeError("no stable go release found")
 
 
@@ -163,44 +179,54 @@ _CUDA_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def _iter_cuda_tags() -> list[dict[str, Any]]:
-    tags: list[dict[str, Any]] = []
+def _iter_cuda_tags() -> list[dict[str, object]]:
+    tags: list[dict[str, object]] = []
     url: str | None = (
         "https://hub.docker.com/v2/repositories/nvidia/cuda/tags"
         "?page_size=100&name=cudnn-devel-ubuntu24.04"
     )
     while url:
-        page = _http_get_json(url)
-        tags.extend(page.get("results", []))
-        url = page.get("next")
+        page = _as_dict(_http_get_json(url))
+        results = page.get("results")
+        if isinstance(results, list):
+            tags.extend(_as_dict(item) for item in results)
+        next_url = page.get("next")
+        url = next_url if isinstance(next_url, str) else None
     return tags
+
+
+def _arch_in_images(images: object, arch: str) -> bool:
+    if not isinstance(images, list):
+        return False
+    return any(isinstance(image, dict) and image.get("architecture") == arch for image in images)
 
 
 def resolve_cuda_base_image(arch: str) -> str:
     """Latest ``nvidia/cuda:*-cudnn-devel-ubuntu24.04`` with a manifest for *arch*."""
-    candidates: list[tuple[tuple[int, int, int], str, list[dict[str, Any]]]] = []
+    candidates: list[tuple[tuple[int, int, int], str, object]] = []
     for tag_entry in _iter_cuda_tags():
-        name = tag_entry.get("name", "")
-        match = _CUDA_TAG_PATTERN.match(name)
+        name_value = tag_entry.get("name")
+        if not isinstance(name_value, str):
+            continue
+        match = _CUDA_TAG_PATTERN.match(name_value)
         if match is None:
             continue
         version = (int(match[1]), int(match[2]), int(match[3]))
-        candidates.append((version, name, tag_entry.get("images", []) or []))
+        candidates.append((version, name_value, tag_entry.get("images")))
 
     candidates.sort(key=lambda item: item[0], reverse=True)
 
     for _version, name, images in candidates:
-        if any(image.get("architecture") == arch for image in images):
+        if _arch_in_images(images, arch):
             return f"nvidia/cuda:{name}"
 
-    raise RuntimeError(
-        f"no nvidia/cuda cudnn-devel-ubuntu24.04 tag found with a {arch} manifest"
-    )
+    raise RuntimeError(f"no nvidia/cuda cudnn-devel-ubuntu24.04 tag found with a {arch} manifest")
 
 
 # ---------------------------------------------------------------------------
 # Build args
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class BaseImageBuildArgs:
@@ -314,12 +340,8 @@ def compute_build_args(
         f"{purescript_version}/{purescript_asset}"
     )
     ghcup_download_url = f"https://downloads.haskell.org/~ghcup/{ghcup_arch}-linux-ghcup"
-    kind_download_url = (
-        f"https://kind.sigs.k8s.io/dl/{kind_version}/kind-linux-{arch}"
-    )
-    kubectl_download_url = (
-        f"https://dl.k8s.io/release/{kubectl_version}/bin/linux/{arch}/kubectl"
-    )
+    kind_download_url = f"https://kind.sigs.k8s.io/dl/{kind_version}/kind-linux-{arch}"
+    kubectl_download_url = f"https://dl.k8s.io/release/{kubectl_version}/bin/linux/{arch}/kubectl"
     helm_download_url = f"https://get.helm.sh/helm-{helm_version}-linux-{arch}.tar.gz"
     mc_download_url = f"https://dl.min.io/client/mc/release/linux-{arch}/mc"
     aws_download_url = f"https://awscli.amazonaws.com/awscli-exe-linux-{aws_arch}.zip"

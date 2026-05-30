@@ -1,1 +1,1 @@
-"""Execution-model implementations (outer-container, host-binary, multi-substrate)."""
+"""Execution-model implementations (container, host-binary, host-daemon)."""

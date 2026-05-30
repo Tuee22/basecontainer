@@ -15,17 +15,18 @@ packages = [{ include = "hostbootstrap" }]
 python = ">=3.12,<4.0"
 click = ">=8.1,<9.0"
 httpx = ">=0.27,<1.0"
-pyyaml = ">=6.0,<7.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.5,<1.0"
 black = ">=24.0,<26.0"
 mypy = ">=1.10,<2.0"
-types-PyYAML = ">=6.0,<7.0"
+pytest = ">=8.0,<9.0"
+pytest-asyncio = ">=0.23,<2.0"
 
 [tool.poetry.scripts]
 hostbootstrap = "hostbootstrap.cli:main"
 check-code = "hostbootstrap.check_code:main"
+test-all = "hostbootstrap.test_all:main"
 
 [tool.ruff]
 line-length = 100
@@ -53,10 +54,19 @@ target-version = ["py312"]
 python_version = "3.12"
 strict = true
 disallow_untyped_defs = true
-disallow_any_explicit = false
+disallow_any_explicit = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_return_any = true
 no_implicit_reexport = true
 mypy_path = "stubs"
 files = ["hostbootstrap"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "dhall: requires a provisioned dhall-to-json binary (skips if unavailable)",
+    "docker: requires a running Docker daemon (skips if unavailable)",
+    "slow: long-running test",
+]

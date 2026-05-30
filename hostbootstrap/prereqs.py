@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .spec import ProjectSpec
+from .spec import HostBinaryModel, HostDaemonModel, HostReqs, ProjectSpec
 from .substrate import Substrate, SubstrateName
 
 
@@ -79,9 +79,7 @@ def _check_ubuntu_2404() -> None:
     os_release = Path("/etc/os-release")
     if not os_release.is_file():
         raise PrereqError("cannot read /etc/os-release; Linux substrates require Ubuntu 24.04")
-    data = dict(
-        line.split("=", 1) for line in os_release.read_text().splitlines() if "=" in line
-    )
+    data = dict(line.split("=", 1) for line in os_release.read_text().splitlines() if "=" in line)
     distro_id = data.get("ID", "").strip('"')
     version_id = data.get("VERSION_ID", "").strip('"')
     if distro_id != "ubuntu" or version_id != "24.04":
@@ -116,9 +114,7 @@ def _check_xcode_clt() -> None:
 
 def _check_homebrew() -> None:
     if not _have("brew"):
-        raise PrereqError(
-            "Homebrew is required on apple-silicon. Install from https://brew.sh."
-        )
+        raise PrereqError("Homebrew is required on apple-silicon. Install from https://brew.sh.")
 
 
 def _check_colima_launchdaemon() -> None:
@@ -169,11 +165,16 @@ async def _run_apple(spec: ProjectSpec, substrate: Substrate) -> DoctorResult:
     messages.append("Docker daemon reachable: OK")
 
     apple = spec.substrates.get(SubstrateName.APPLE_SILICON)
-    if apple is not None:
-        if apple.host.tart and not _have("tart"):
-            raise PrereqError("yaml requires Tart; install via `brew install cirruslabs/cli/tart`")
-        if apple.host.ghc and not _have("ghcup"):
-            raise PrereqError("yaml requires GHC on host; install via `brew install ghcup-hs`")
+    host: HostReqs | None = None
+    if isinstance(apple, (HostBinaryModel, HostDaemonModel)):
+        host = apple.build.host
+    if host is not None:
+        if host.tart and not _have("tart"):
+            raise PrereqError(
+                "config requires Tart; install via `brew install cirruslabs/cli/tart`"
+            )
+        if host.ghc and not _have("ghcup"):
+            raise PrereqError("config requires GHC on host; install via `brew install ghcup-hs`")
 
     return DoctorResult(substrate=substrate, messages=tuple(messages))
 

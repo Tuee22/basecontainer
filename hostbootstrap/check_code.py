@@ -19,7 +19,9 @@ def main() -> int:
     for step in (
         ("ruff", "check", *_PACKAGES),
         ("black", "--check", *_PACKAGES),
-        ("mypy", *_PACKAGES),
+        # `stubs/` is on mypy_path for resolution, not a check target; mypy
+        # errors on an empty directory, so only the package is type-checked.
+        ("mypy", "hostbootstrap"),
     ):
         rc = _run(step)
         if rc != 0:
